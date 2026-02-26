@@ -1,0 +1,5 @@
+{
+  "name": "ClawWeb Assistant",
+  "description": "A personal AI assistant with persistent memory and extensible skills, inspired by OpenClaw.",
+  "requestFramePermissions": []
+}

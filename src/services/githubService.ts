@@ -28,65 +28,85 @@ export class GitHubService {
 
     console.log(`正在嘗試同步到 GitHub: ${owner}/${repo}`);
 
-    // Verify repo and token permissions
+    // 1. Verify repo and get default branch
+    let defaultBranch = "main";
     try {
       const { data: repoData } = await octokit.rest.repos.get({ owner, repo });
-      console.log(`成功連線至倉庫: ${repoData.full_name}, 權限: ${JSON.stringify(repoData.permissions)}`);
+      defaultBranch = repoData.default_branch;
       
       if (repoData.permissions && !repoData.permissions.push) {
-        throw new Error("您的 Token 對此倉庫沒有 'Push' (寫入) 權限。請檢查 Token 設定。");
+        throw new Error("您的 Token 對此倉庫沒有 'Push' (寫入) 權限。");
       }
     } catch (e: any) {
-      if (e.status === 404) {
-        throw new Error(`找不到儲存庫 "${owner}/${repo}"。請確認：1. 倉庫已建立 2. 帳號名稱正確 3. Token 有權限看到此倉庫。`);
-      }
-      if (e.status === 401) {
-        throw new Error("GitHub Token 無效或已過期。請重新產生 Token 並更新 Secret。");
-      }
-      throw new Error(`無法存取 GitHub (狀態碼: ${e.status}): ${e.message}`);
+      if (e.status === 404) throw new Error(`找不到儲存库 "${owner}/${repo}"`);
+      throw e;
     }
 
-    const results = [];
+    // 2. Get the latest commit SHA of the default branch
+    const { data: refData } = await octokit.rest.git.getRef({
+      owner,
+      repo,
+      ref: `heads/${defaultBranch}`,
+    });
+    const latestCommitSha = refData.object.sha;
+
+    // 3. Get the tree SHA of the latest commit
+    const { data: commitData } = await octokit.rest.git.getCommit({
+      owner,
+      repo,
+      commit_sha: latestCommitSha,
+    });
+    const baseTreeSha = commitData.tree.sha;
+
+    // 4. Prepare the tree changes
+    const treeItems = [];
+    const syncResults = [];
+
     for (const filePath of files) {
-      try {
-        const fullPath = path.join(process.cwd(), filePath);
-        if (!fs.existsSync(fullPath)) {
-          results.push(`⚠️ ${filePath}: 檔案不存在於伺服器`);
-          continue;
-        }
-
+      const fullPath = path.join(process.cwd(), filePath);
+      if (fs.existsSync(fullPath)) {
         const content = fs.readFileSync(fullPath, "utf8");
-        const base64Content = Buffer.from(content).toString("base64");
-
-        // Check if file exists to get SHA
-        let sha: string | undefined;
-        try {
-          const { data } = await octokit.rest.repos.getContent({
-            owner,
-            repo,
-            path: filePath,
-          });
-          if (!Array.isArray(data)) {
-            sha = data.sha;
-          }
-        } catch (e: any) {
-          // 404 is fine here, means new file
-          if (e.status !== 404) throw e;
-        }
-
-        await octokit.rest.repos.createOrUpdateFileContents({
-          owner,
-          repo,
+        treeItems.push({
           path: filePath,
-          message: `Sync ${filePath} - ClawWeb v2.0 Release`,
-          content: base64Content,
-          sha,
+          mode: "100644" as const,
+          type: "blob" as const,
+          content: content,
         });
-        results.push(`✅ ${filePath}`);
-      } catch (err: any) {
-        results.push(`❌ ${filePath}: ${err.message}`);
+        syncResults.push(`✅ ${filePath}`);
+      } else {
+        syncResults.push(`⚠️ ${filePath}: 檔案不存在`);
       }
     }
-    return results.join("\n");
+
+    if (treeItems.length === 0) {
+      return "沒有檔案需要同步";
+    }
+
+    // 5. Create a new tree
+    const { data: newTreeData } = await octokit.rest.git.createTree({
+      owner,
+      repo,
+      base_tree: baseTreeSha,
+      tree: treeItems,
+    });
+
+    // 6. Create a new commit
+    const { data: newCommitData } = await octokit.rest.git.createCommit({
+      owner,
+      repo,
+      message: `Sync ${treeItems.length} files - ClawWeb v2.0 Bundle`,
+      tree: newTreeData.sha,
+      parents: [latestCommitSha],
+    });
+
+    // 7. Update the reference
+    await octokit.rest.git.updateRef({
+      owner,
+      repo,
+      ref: `heads/${defaultBranch}`,
+      sha: newCommitData.sha,
+    });
+
+    return `同步成功！已將 ${treeItems.length} 個檔案打包為單一 Commit。\n\n詳細清單：\n${syncResults.join("\n")}`;
   }
 }

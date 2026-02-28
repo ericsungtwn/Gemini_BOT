@@ -412,6 +412,7 @@ async function startServer() {
     // initBots().catch(e => console.error("[System] Async initBots failed:", e));
 
     app.get("/api/debug/env", (req, res) => {
+      console.log("[Debug] Env Keys:", Object.keys(process.env));
       res.json({
         TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.substring(0, 4) + "..." : "Not Set",
         TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || "Not Set",

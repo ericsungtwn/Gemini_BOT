@@ -10,17 +10,34 @@ import { Message } from './types';
 import { gemini } from './services/geminiService';
 import { Send, Terminal, ShieldCheck, Zap } from 'lucide-react';
 
+export interface Skill {
+  id?: number;
+  name: string;
+  content: string;
+}
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [savedMessages, setSavedMessages] = useState<Message[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [debugInfo, setDebugInfo] = useState<any>(null);
 
   // Load history on mount
   useEffect(() => {
     fetch('/api/messages')
       .then(res => res.json())
-      .then(data => setMessages(data))
+      .then(data => {
+        setMessages(data);
+        setSavedMessages(data);
+      })
       .catch(err => console.error('Failed to load history:', err));
+
+    fetch('/api/skills')
+      .then(res => res.json())
+      .then(data => setSkills(data))
+      .catch(err => console.error('Failed to load skills:', err));
 
     const playNotificationSound = () => {
       try {
@@ -93,7 +110,26 @@ export default function App() {
     };
 
     const socket = connectWebSocket();
-    return () => socket.close();
+    return () => {
+      socket.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    const fetchDebugInfo = async () => {
+      try {
+        const res = await fetch('/api/debug/status');
+        const data = await res.json();
+        setDebugInfo(data);
+      } catch (err) {
+        console.error('Failed to fetch debug info:', err);
+      }
+    };
+
+    fetchDebugInfo(); // Fetch immediately on mount
+    const debugInterval = setInterval(fetchDebugInfo, 5000); // Fetch every 5 seconds
+
+    return () => clearInterval(debugInterval);
   }, []);
 
   const saveMessage = async (role: 'user' | 'model', content: string) => {
@@ -106,6 +142,29 @@ export default function App() {
       return await res.json();
     } catch (err) {
       console.error('Failed to save message:', err);
+    }
+  };
+
+  const addSkill = async (name: string, content: string) => {
+    try {
+      const res = await fetch('/api/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, content })
+      });
+      const newSkill = await res.json();
+      setSkills(prev => [...prev, newSkill]);
+    } catch (err) {
+      console.error('Failed to add skill:', err);
+    }
+  };
+
+  const deleteSkill = async (id: number) => {
+    try {
+      await fetch(`/api/skills/${id}`, { method: 'DELETE' });
+      setSkills(prev => prev.filter(skill => skill.id !== id));
+    } catch (err) {
+      console.error('Failed to delete skill:', err);
     }
   };
 
@@ -196,9 +255,14 @@ export default function App() {
       const modelMsg: Message = { role: 'model', content: finalResponse || "Action completed.", timestamp: new Date().toISOString() };
       setMessages(prev => [...prev, modelMsg]);
       await saveMessage('model', finalResponse || "Action completed.");
-    } catch (err) {
+    } catch (err: any) {
       console.error('Chat error:', err);
-      const errorMsg: Message = { role: 'model', content: "Error: Failed to connect to neural core.", timestamp: new Date().toISOString() };
+      const isRateLimit = err.message?.includes("429") || err.message?.includes("quota");
+      const content = isRateLimit 
+        ? "⚠️ **系統提示：達到 API 使用頻率限制 (Rate Limit)**\n\n由於目前使用的是免費版 Gemini API，每分鐘的請求次數有限。請稍等約 15-30 秒後再試一次。"
+        : "Error: Failed to connect to neural core. Please check your internet connection or API key.";
+      
+      const errorMsg: Message = { role: 'model', content, timestamp: new Date().toISOString() };
       setMessages(prev => [...prev, errorMsg]);
     } finally {
       setIsTyping(false);
@@ -231,18 +295,18 @@ export default function App() {
   };
 
   return (
-    <div className="h-screen w-screen flex bg-[#050505] text-white font-sans overflow-hidden">
+    <div className="h-screen w-screen flex bg-gray-900 text-gray-100 font-sans overflow-hidden">
       {/* Main Terminal Area */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Header */}
-        <header className="h-16 border-b border-white/10 flex items-center justify-between px-8 bg-[#0a0a0a]">
+        <header className="h-16 border-b border-gray-700 flex items-center justify-between px-8 bg-gray-800">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <Zap size={20} className="text-indigo-500" />
               <h1 className="font-mono font-bold text-lg uppercase tracking-tighter">ClawWeb Assistant</h1>
             </div>
-            <div className="h-4 w-px bg-white/10" />
-            <div className="flex items-center gap-2 text-[10px] font-mono uppercase opacity-40">
+            <div className="h-4 w-px bg-gray-700" />
+            <div className="flex items-center gap-2 text-xs font-mono uppercase text-gray-400">
               <ShieldCheck size={12} className="text-emerald-500" />
               <span>Environment: Secure Sandbox</span>
             </div>
@@ -250,8 +314,8 @@ export default function App() {
 
           <div className="flex items-center gap-6">
             <div className="text-right">
-              <div className="text-[9px] font-mono uppercase opacity-30">Neural Core</div>
-              <div className="text-[11px] font-mono text-indigo-400">Gemini 3 Flash</div>
+              <div className="text-xs font-mono uppercase text-gray-500">Neural Core</div>
+              <div className="text-sm font-mono text-indigo-400">Gemini 1.5 Flash</div>
             </div>
           </div>
         </header>
@@ -260,39 +324,48 @@ export default function App() {
         <ChatInterface messages={messages} isTyping={isTyping} />
 
         {/* Input Area */}
-        <footer className="p-6 border-t border-white/10 bg-[#0a0a0a]">
+        <footer className="p-6 border-t border-gray-700 bg-gray-800">
           <form onSubmit={handleSend} className="max-w-4xl mx-auto relative group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-lg blur opacity-10 group-focus-within:opacity-20 transition duration-500" />
-            <div className="relative flex items-center bg-[#050505] border border-white/10 rounded-lg overflow-hidden focus-within:border-indigo-500/50 transition-colors">
-              <div className="pl-4 text-white/20">
-                <Terminal size={18} />
+            <div className="relative flex items-center bg-gray-900 border border-gray-700 rounded-lg overflow-hidden focus-within:border-indigo-500/50 transition-colors">
+              <div className="pl-4 text-gray-400">
+                <Terminal size={20} />
               </div>
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Enter command or query..."
-                className="flex-1 bg-transparent border-none focus:ring-0 text-sm font-mono p-4 placeholder:text-white/10"
+                className="flex-1 bg-transparent border-none focus:ring-0 text-base font-mono p-4 placeholder:text-gray-500"
                 disabled={isTyping}
               />
               <button
                 type="submit"
                 disabled={!input.trim() || isTyping}
-                className="p-4 text-indigo-500 hover:text-indigo-400 disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
+                className="p-4 text-indigo-400 hover:text-indigo-300 disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
               >
-                <Send size={18} />
+                <Send size={20} />
               </button>
             </div>
             <div className="mt-2 flex justify-between px-1">
-              <span className="text-[9px] font-mono uppercase opacity-20">Press Enter to execute</span>
-              <span className="text-[9px] font-mono uppercase opacity-20">Persistent memory active</span>
+              <span className="text-xs font-mono uppercase text-gray-500">Press Enter to execute</span>
+              <span className="text-xs font-mono uppercase text-gray-500">Persistent memory active</span>
             </div>
           </form>
         </footer>
       </main>
 
       {/* Sidebar */}
-      <Sidebar onClearHistory={clearHistory} messageCount={messages.length} />
+      <Sidebar 
+        onClearHistory={clearHistory} 
+        messageCount={messages.length} 
+        savedMessages={savedMessages} 
+        skills={skills}
+        addSkill={addSkill}
+        deleteSkill={deleteSkill}
+        onPromptSelect={(prompt) => setInput(prompt)}
+        debugInfo={debugInfo}
+      />
     </div>
   );
 }

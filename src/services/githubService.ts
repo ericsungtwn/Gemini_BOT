@@ -78,7 +78,7 @@ export class GitHubService {
           owner,
           repo,
           path: filePath,
-          message: `Sync ${filePath} via ClawWeb Assistant`,
+          message: `Sync ${filePath} - ClawWeb v2.0 Release`,
           content: base64Content,
           sha,
         });

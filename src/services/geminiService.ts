@@ -49,13 +49,14 @@ export class GeminiService {
     else if (k2 && !isLabel(k2)) apiKey = k2;
     
     if (!apiKey) {
-      console.error("GEMINI_API_KEY is missing or invalid label detected.");
+      console.error("GEMINI_API_KEY is missing or invalid label detected. Please check your Secrets configuration.");
     }
+    // Use the key if found, otherwise fallback to a dummy string to prevent immediate crash
     this.ai = new GoogleGenAI({ apiKey: apiKey || "MISSING_KEY" });
   }
 
   async chat(userMessage: string, history: Message[]): Promise<{ text: string, functionCalls?: any[] }> {
-    const model = "gemini-3-flash-preview";
+    const model = "gemini-flash-latest";
     
     const contents = history.map(msg => ({
       role: msg.role === 'model' ? 'model' : 'user',
@@ -123,6 +124,29 @@ export class GeminiService {
                   }
                 },
                 required: ["confirm"]
+              }
+            },
+            {
+              name: "setStockAlert",
+              description: "Set a price alert for a stock symbol.",
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  symbol: {
+                    type: Type.STRING,
+                    description: "The stock symbol (e.g., AAPL, 2330.TW)."
+                  },
+                  targetPrice: {
+                    type: Type.NUMBER,
+                    description: "The target price to trigger the alert."
+                  },
+                  condition: {
+                    type: Type.STRING,
+                    description: "Trigger when price is 'above' or 'below' the target.",
+                    enum: ["above", "below"]
+                  }
+                },
+                required: ["symbol", "targetPrice", "condition"]
               }
             }
           ]

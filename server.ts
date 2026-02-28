@@ -525,7 +525,8 @@ async function startServer() {
         "src/services/geminiService.ts",
         "src/services/githubService.ts",
         "package.json",
-        "metadata.json"
+        "metadata.json",
+        "README.md"
       ];
       const result = await github.syncFiles(filesToSync);
       lastSyncTime = new Date().toLocaleString();

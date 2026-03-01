@@ -22,6 +22,8 @@ export default function App() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
+  const [retryStatus, setRetryStatus] = useState<string | null>(null);
   const [debugInfo, setDebugInfo] = useState<any>(null);
 
   // Load history on mount
@@ -181,14 +183,26 @@ export default function App() {
     await saveMessage('user', userText);
 
     setIsTyping(true);
+    setRetryStatus(null);
     try {
-      const { text, functionCalls } = await gemini.chat(userText, messages);
+      const { text, functionCalls } = await gemini.chat(userText, messages, 0, (attempt) => {
+        setRetryStatus(`系統忙碌中，正在進行第 ${attempt} 次重試...`);
+      });
+      setRetryStatus(null);
+      
+      // Log API usage
+      fetch('/api/usage/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'gemini-flash-latest' })
+      }).catch(e => console.error('Failed to log usage:', e));
       
       let finalResponse = text;
 
       if (functionCalls && functionCalls.length > 0) {
         for (const call of functionCalls) {
           if (call.name === 'sendTelegramMessage') {
+            setTaskStatus('正在傳送 Telegram 訊息...');
             const { message: telegramMsg, delayMs } = call.args;
             try {
               const res = await fetch('/api/telegram/send', {
@@ -211,6 +225,7 @@ export default function App() {
               finalResponse += `\n\n[System: Error connecting to Telegram API.]`;
             }
           } else if (call.name === 'browseWeb') {
+            setTaskStatus(`正在瀏覽網頁: ${call.args.url}...`);
             const { url, action } = call.args;
             try {
               const res = await fetch('/api/browser', {
@@ -232,7 +247,44 @@ export default function App() {
             } catch (err) {
               finalResponse += `\n\n[System: Error connecting to Browser API.]`;
             }
+          } else if (call.name === 'summarize_url') {
+            setTaskStatus(`正在抓取並摘要網頁: ${call.args.url}...`);
+            const { url } = call.args;
+            try {
+              const scrapeRes = await fetch('/api/knowledge/scrape', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+              });
+              if (scrapeRes.ok) {
+                const scrapeData = await scrapeRes.json();
+                setTaskStatus('正在使用 AI 生成摘要...');
+                // Get summary from Gemini (using a separate call to not mess up history)
+                const summaryRes = await gemini.chat(`請摘要以下網頁內容，並以繁體中文回答：\n\n${scrapeData.text}`, []);
+                const summary = summaryRes.text;
+                
+                setTaskStatus('正在儲存至知識庫...');
+                // Save to Knowledge Base
+                await fetch('/api/knowledge/save', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ 
+                    url, 
+                    title: scrapeData.title, 
+                    content: scrapeData.text, 
+                    summary 
+                  })
+                });
+                
+                finalResponse += `\n\n📚 **知識庫更新 (${scrapeData.title}):**\n${summary}`;
+              } else {
+                finalResponse += `\n\n[Knowledge Base Error: 無法抓取網頁內容]`;
+              }
+            } catch (err) {
+              finalResponse += `\n\n[Knowledge Base Error: 處理 ${url} 時發生錯誤]`;
+            }
           } else if (call.name === 'syncToGitHub') {
+            setTaskStatus('正在同步至 GitHub...');
             try {
               const res = await fetch('/api/github/sync', {
                 method: 'POST',
@@ -257,15 +309,24 @@ export default function App() {
       await saveMessage('model', finalResponse || "Action completed.");
     } catch (err: any) {
       console.error('Chat error:', err);
+      setRetryStatus(null);
+      setTaskStatus(null);
       const isRateLimit = err.message?.includes("429") || err.message?.includes("quota");
-      const content = isRateLimit 
-        ? "⚠️ **系統提示：達到 API 使用頻率限制 (Rate Limit)**\n\n由於目前使用的是免費版 Gemini API，每分鐘的請求次數有限。請稍等約 15-30 秒後再試一次。"
-        : "Error: Failed to connect to neural core. Please check your internet connection or API key.";
+      const isHighDemand = err.message?.includes("503") || err.message?.includes("high demand");
+      
+      let content = "Error: Failed to connect to neural core. Please check your internet connection or API key.";
+      if (isRateLimit) {
+        content = "⚠️ **系統提示：達到 API 使用頻率限制 (Rate Limit)**\n\n由於目前使用的是免費版 Gemini API，每分鐘的請求次數有限。請稍等約 15-30 秒後再試一次。";
+      } else if (isHighDemand) {
+        content = "⚠️ **系統提示：伺服器負載過高 (503 High Demand)**\n\nGoogle 伺服器目前非常忙碌，自動重試 3 次後依然失敗。請稍等 1 分鐘後再試一次。";
+      }
       
       const errorMsg: Message = { role: 'model', content, timestamp: new Date().toISOString() };
       setMessages(prev => [...prev, errorMsg]);
     } finally {
       setIsTyping(false);
+      setRetryStatus(null);
+      setTaskStatus(null);
     }
   };
 
@@ -303,10 +364,10 @@ export default function App() {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <Zap size={20} className="text-indigo-500" />
-              <h1 className="font-mono font-bold text-lg uppercase tracking-tighter">ClawWeb Assistant</h1>
+              <h1 className="font-display font-bold text-lg uppercase tracking-widest italic">ClawWeb Assistant</h1>
             </div>
             <div className="h-4 w-px bg-gray-700" />
-            <div className="flex items-center gap-2 text-xs font-mono uppercase text-gray-400">
+            <div className="flex items-center gap-2 text-[10px] font-display font-medium uppercase tracking-widest text-gray-400 italic">
               <ShieldCheck size={12} className="text-emerald-500" />
               <span>Environment: Secure Sandbox</span>
             </div>
@@ -314,20 +375,28 @@ export default function App() {
 
           <div className="flex items-center gap-6">
             <div className="text-right">
-              <div className="text-xs font-mono uppercase text-gray-500">Neural Core</div>
-              <div className="text-sm font-mono text-indigo-400">Gemini 1.5 Flash</div>
+              <div className="text-[10px] font-display uppercase tracking-widest text-gray-500 italic">Neural Core</div>
+              <div className="text-sm font-display font-medium text-indigo-400 italic">Gemini 1.5 Flash</div>
             </div>
           </div>
         </header>
 
         {/* Chat Area */}
-        <ChatInterface messages={messages} isTyping={isTyping} />
+        <ChatInterface messages={messages} isTyping={isTyping} taskStatus={taskStatus} />
 
         {/* Input Area */}
         <footer className="p-6 border-t border-gray-700 bg-gray-800">
           <form onSubmit={handleSend} className="max-w-4xl mx-auto relative group">
             <div className="absolute -inset-0.5 bg-gradient-to-r from-indigo-500 to-emerald-500 rounded-lg blur opacity-10 group-focus-within:opacity-20 transition duration-500" />
             <div className="relative flex items-center bg-gray-900 border border-gray-700 rounded-lg overflow-hidden focus-within:border-indigo-500/50 transition-colors">
+              {retryStatus && (
+                <div className="absolute top-0 left-0 right-0 -translate-y-full pb-2">
+                  <div className="bg-indigo-500/10 border border-indigo-500/30 rounded px-3 py-1 flex items-center gap-2 animate-pulse">
+                    <Zap size={12} className="text-indigo-400 animate-spin" />
+                    <span className="text-[10px] font-mono uppercase text-indigo-400">{retryStatus}</span>
+                  </div>
+                </div>
+              )}
               <div className="pl-4 text-gray-400">
                 <Terminal size={20} />
               </div>
@@ -348,8 +417,8 @@ export default function App() {
               </button>
             </div>
             <div className="mt-2 flex justify-between px-1">
-              <span className="text-xs font-mono uppercase text-gray-500">Press Enter to execute</span>
-              <span className="text-xs font-mono uppercase text-gray-500">Persistent memory active</span>
+              <span className="text-[10px] font-display font-medium uppercase tracking-widest text-gray-500 italic">Press Enter to execute</span>
+              <span className="text-[10px] font-display font-medium uppercase tracking-widest text-gray-500 italic">Persistent memory active</span>
             </div>
           </form>
         </footer>

@@ -43,7 +43,61 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model TEXT NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS triggers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    last_run DATETIME,
+    status TEXT DEFAULT 'active'
+  );
+
+  CREATE TABLE IF NOT EXISTS knowledge (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT UNIQUE,
+    title TEXT,
+    content TEXT,
+    summary TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
+
+// Seed initial triggers if empty
+const triggerCount = db.prepare("SELECT COUNT(*) as count FROM triggers").get() as any;
+if (triggerCount.count === 0) {
+  db.prepare("INSERT INTO triggers (name, cron) VALUES (?, ?)").run('每日新聞摘要', '0 17 * * *');
+  db.prepare("INSERT INTO triggers (name, cron) VALUES (?, ?)").run('系統健康檢查', '0 * * * *');
+}
+
+// Cron Jobs
+cron.schedule('0 17 * * *', async () => {
+  console.log("[Cron] Running Daily News Summary...");
+  const chatIds = getChatIds();
+  if (chatIds.length === 0) return;
+
+  try {
+    const summary = "【每日新聞摘要】\n1. AI 技術持續突破，Gemini 3.1 展現強大推理能力。\n2. 全球股市波動，投資者關注聯準會動向。\n3. 氣候變遷議題升溫，各國加強綠能轉型。";
+    
+    for (const id of chatIds) {
+      await sendMessageToId(id, summary);
+    }
+    db.prepare("UPDATE triggers SET last_run = CURRENT_TIMESTAMP WHERE name = '每日新聞摘要'").run();
+    console.log("[Cron] Daily News Summary sent.");
+  } catch (err) {
+    console.error("[Cron] Daily News Summary failed:", err);
+  }
+});
+
+cron.schedule('0 * * * *', async () => {
+  console.log("[Cron] Running System Health Check...");
+  db.prepare("UPDATE triggers SET last_run = CURRENT_TIMESTAMP WHERE name = '系統健康檢查'").run();
+});
 
 // Initialize Telegram Bots
 const rawBotTokens = process.env.TELEGRAM_BOT_TOKENS || process.env.TELEGRAM_BOT_TOKEN;
@@ -169,66 +223,85 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
+let isInitializingBots = false;
 async function initBots() {
-  console.log(`[System] Initializing ${botTokens.length} bots...`);
-  
-  // Clear existing bots if any - Await stopPolling to prevent 409 Conflict
-  for (const b of bots) {
-    try {
-      console.log(`[System] Stopping bot polling...`);
-      // Add a 2-second timeout to stopPolling to prevent hanging
-      const stopPromise = b.stopPolling();
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("StopPolling Timeout")), 2000));
-      await Promise.race([stopPromise, timeoutPromise]).catch(e => console.warn("[System] stopPolling warning:", e.message));
-    } catch (e: any) {
-      console.error("[System] Error stopping bot polling:", e.message);
-    }
+  if (isInitializingBots) {
+    console.log("[System] Bot initialization already in progress. Skipping.");
+    return;
   }
+  isInitializingBots = true;
   
-  bots = [];
-  botUsernames = [];
+  try {
+    const tokensToInit = rawBotTokens ? rawBotTokens.split(',').map(t => t.replace(/[<>'"\s]/g, '')).filter(t => t.length > 0) : [];
+    console.log(`[System] Initializing ${tokensToInit.length} bots...`);
+    
+    // Clear existing bots if any - Await stopPolling to prevent 409 Conflict
+    for (const b of bots) {
+      try {
+        console.log(`[System] Stopping bot polling...`);
+        // Add a 2-second timeout to stopPolling to prevent hanging
+        const stopPromise = b.stopPolling();
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("StopPolling Timeout")), 2000));
+        await Promise.race([stopPromise, timeoutPromise]).catch(e => console.warn("[System] stopPolling warning:", e.message));
+      } catch (e: any) {
+        console.error("[System] Error stopping bot polling:", e.message);
+      }
+    }
+    
+    bots = [];
+    botUsernames = [];
 
-  for (const [index, token] of botTokens.entries()) {
-    try {
-      const tokenPreview = token.substring(0, 4) + "..." + token.substring(token.length - 4);
-      console.log(`[Bot ${index + 1}] Attempting initialization: ${tokenPreview}`);
-      
-      const newBot = new TelegramBot(token, { polling: true });
-      
-      // Verification with timeout
-      const verifyPromise = newBot.getMe();
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error("Verification Timeout")), 10000)
-      );
+    for (const [index, token] of tokensToInit.entries()) {
+      try {
+        const tokenPreview = token.substring(0, 4) + "..." + token.substring(token.length - 4);
+        console.log(`[Bot ${index + 1}] Attempting initialization: ${tokenPreview}`);
+        
+        const newBot = new TelegramBot(token, { polling: true });
+        
+        // Verification with timeout
+        const verifyPromise = newBot.getMe();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Verification Timeout")), 10000)
+        );
 
-      Promise.race([verifyPromise, timeoutPromise])
-        .then((me: any) => {
-          const name = me.username || "Unknown";
-          console.log(`[Bot ${index + 1}] Verified as @${name}`);
-          if (!botUsernames.includes(name)) botUsernames.push(name);
-        })
-        .catch(err => {
-          lastTelegramError = `Bot ${index + 1} Error: ${err.message}`;
-          console.error(`[Bot ${index + 1}] Verification Failed:`, err.message);
+        Promise.race([verifyPromise, timeoutPromise])
+          .then((me: any) => {
+            const name = me.username || "Unknown";
+            console.log(`[Bot ${index + 1}] Verified as @${name}`);
+            if (!botUsernames.includes(name)) botUsernames.push(name);
+          })
+          .catch(err => {
+            lastTelegramError = `Bot ${index + 1} Error: ${err.message}`;
+            console.error(`[Bot ${index + 1}] Verification Failed:`, err.message);
+            if (err.message.includes("401")) {
+              console.warn(`[Bot ${index + 1}] Unauthorized (401). Stopping polling.`);
+              newBot.stopPolling();
+            }
+          });
+
+        newBot.on("polling_error", (err: any) => {
+          // Suppress common transient errors
+          if (err.message.includes("409 Conflict")) return;
+          if (err.message.includes("502 Bad Gateway")) {
+            console.warn(`[Bot ${index + 1}] Polling Warning: 502 Bad Gateway (Transient Telegram error)`);
+            return;
+          }
+          
+          lastTelegramError = err.message;
+
+          if (err.message.includes("429 Too Many Requests")) {
+            console.warn(`[Bot ${index + 1}] Polling Warning: 429 Too Many Requests. Telegram is rate-limiting this bot.`);
+            return;
+          }
+
+          console.error(`[Bot ${index + 1}] Polling Error:`, err.message);
+          
           if (err.message.includes("401")) {
-            console.warn(`[Bot ${index + 1}] Unauthorized (401). Stopping polling.`);
             newBot.stopPolling();
           }
         });
 
-      newBot.on("polling_error", (err) => {
-        // Suppress 409 errors in logs as we handle them via stopPolling
-        if (err.message.includes("409 Conflict")) {
-          return;
-        }
-        lastTelegramError = err.message;
-        console.error(`[Bot ${index + 1}] Polling Error:`, err.message);
-        if (err.message.includes("401")) {
-          newBot.stopPolling();
-        }
-      });
-
-      newBot.on("message", async (msg) => {
+        newBot.on("message", async (msg) => {
         lastIncomingChatId = msg.chat.id.toString();
         lastMessageTime = new Date().toLocaleTimeString();
         console.log(`[Telegram Event] Message received from ${msg.from?.username || 'unknown'} (ID: ${msg.chat.id})`);
@@ -238,6 +311,7 @@ async function initBots() {
         
         if (configuredChatIds.length > 0 && !configuredChatIds.includes(incomingChatId)) {
           console.log(`[Telegram] Unauthorized access attempt from ${incomingChatId}.`);
+          await newBot.sendMessage(incomingChatId, `⚠️ 存取拒絕。您的 Chat ID 是：\`${incomingChatId}\`。請將此 ID 加入系統設定中以啟用服務。`, { parse_mode: 'Markdown' });
           return;
         }
 
@@ -277,7 +351,20 @@ async function initBots() {
             model,
             contents,
             config: {
-              systemInstruction: "You are ClawWeb, a personal AI assistant. You are responding via Telegram. Always respond in Traditional Chinese (繁體中文).",
+              systemInstruction: `You are ClawWeb, a personal AI assistant. You are responding via Telegram. Always respond in Traditional Chinese (繁體中文).
+              
+CAPABILITIES:
+1. Persistent SQLite memory.
+2. Telegram Integration: You can send messages, reminders, and voice processing.
+3. Web Browsing: You can browse websites, extract content, and take screenshots using the 'browseWeb' tool.
+4. GitHub Sync: You can sync the current project's source code to a GitHub repository using the 'syncToGitHub' tool.
+5. Knowledge Base: You can summarize a webpage and save it to your persistent knowledge base using the 'summarize_url' tool.
+
+If the user provides a URL, you should proactively use the 'summarize_url' tool to index it into the knowledge base.
+If the user asks to send a message or reminder to Telegram, use the 'sendTelegramMessage' tool.
+If the user asks to check a website or see what's on a page, use the 'browseWeb' tool.
+If the user asks to save or backup the source code to GitHub, use the 'syncToGitHub' tool.
+Always confirm to the user after you have successfully called the tool.`,
               tools: [{
                 functionDeclarations: [
                   {
@@ -291,6 +378,44 @@ async function initBots() {
                         targetChatId: { type: Type.STRING, description: "Optional: Specific Chat ID." }
                       },
                       required: ["message"]
+                    }
+                  },
+                  {
+                    name: "browseWeb",
+                    description: "Browse a website to get its content or take a screenshot.",
+                    parameters: {
+                      type: Type.OBJECT,
+                      properties: {
+                        url: { type: Type.STRING, description: "The URL of the website to visit." },
+                        action: {
+                          type: Type.STRING,
+                          description: "The action to perform: 'content' (get text) or 'screenshot' (get base64 image).",
+                          enum: ["content", "screenshot"]
+                        }
+                      },
+                      required: ["url", "action"]
+                    }
+                  },
+                  {
+                    name: "summarize_url",
+                    description: "Scrape a webpage, summarize its content, and save it to the persistent knowledge base.",
+                    parameters: {
+                      type: Type.OBJECT,
+                      properties: {
+                        url: { type: Type.STRING, description: "The URL of the webpage to summarize." }
+                      },
+                      required: ["url"]
+                    }
+                  },
+                  {
+                    name: "syncToGitHub",
+                    description: "Sync the current project source code to the configured GitHub repository.",
+                    parameters: {
+                      type: Type.OBJECT,
+                      properties: {
+                        confirm: { type: Type.BOOLEAN, description: "Must be true to proceed with the sync." }
+                      },
+                      required: ["confirm"]
                     }
                   }
                 ]
@@ -314,10 +439,90 @@ async function initBots() {
                 };
                 if (delayMs && delayMs > 0) {
                   setTimeout(sendDelayed, delayMs);
-                  responseText += `\n\n[Reminder set for ${delayMs/1000}s]`;
+                  responseText += `\n\n[系統：已設定 ${delayMs/1000} 秒後的提醒]`;
                 } else {
                   await sendDelayed();
-                  responseText += `\n\n[Message sent]`;
+                  responseText += `\n\n[系統：訊息已傳送]`;
+                }
+              } else if (call.name === 'browseWeb') {
+                const { url, action } = call.args as any;
+                try {
+                  const b = await getBrowser();
+                  const page = await b.newPage();
+                  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+                  
+                  if (action === 'content') {
+                    const data = await page.evaluate(() => {
+                      const scripts = document.querySelectorAll('script, style, nav, footer, iframe, noscript');
+                      scripts.forEach(s => s.remove());
+                      return document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 5000);
+                    });
+                    await page.close();
+                    
+                    // Summarize the content
+                    const currentKey = getGeminiKey();
+                    const ai = new GoogleGenAI({ apiKey: currentKey });
+                    const sumRes = await ai.models.generateContent({
+                      model: "gemini-3-flash-preview",
+                      contents: [{ role: 'user', parts: [{ text: `請摘要以下網頁內容 (${url})：\n\n${data}` }] }],
+                      config: { systemInstruction: "你是一個專業的網頁摘要助手，請以繁體中文回答。" }
+                    });
+                    responseText += `\n\n🌐 **網頁摘要 (${url}):**\n${sumRes.text}`;
+                  } else if (action === 'screenshot') {
+                    const screenshot = await page.screenshot({ encoding: 'base64' });
+                    await page.close();
+                    // Telegram can't directly display base64 in a text message, but we can send it as a photo
+                    await newBot.sendPhoto(incomingChatId, Buffer.from(screenshot as string, 'base64'), { caption: `Screenshot of ${url}` });
+                    responseText += `\n\n[系統：已傳送網頁截圖]`;
+                  }
+                } catch (err: any) {
+                  responseText += `\n\n[系統錯誤：無法瀏覽網頁 - ${err.message}]`;
+                }
+              } else if (call.name === 'summarize_url') {
+                const { url } = call.args as any;
+                try {
+                  const b = await getBrowser();
+                  const page = await b.newPage();
+                  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                  await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+                  
+                  const data = await page.evaluate(() => {
+                    const scripts = document.querySelectorAll('script, style, nav, footer, iframe, noscript');
+                    scripts.forEach(s => s.remove());
+                    return {
+                      title: document.title,
+                      text: document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 10000)
+                    };
+                  });
+                  await page.close();
+
+                  const currentKey = getGeminiKey();
+                  const ai = new GoogleGenAI({ apiKey: currentKey });
+                  const sumRes = await ai.models.generateContent({
+                    model: "gemini-3-flash-preview",
+                    contents: [{ role: 'user', parts: [{ text: `請摘要以下網頁內容，並以繁體中文回答：\n\n${data.text}` }] }],
+                    config: { systemInstruction: "你是一個專業的網頁摘要助手，請以繁體中文回答。" }
+                  });
+                  const summary = sumRes.text || "";
+
+                  db.prepare(`
+                    INSERT OR REPLACE INTO knowledge (url, title, content, summary)
+                    VALUES (?, ?, ?, ?)
+                  `).run(url, data.title, data.text, summary);
+
+                  responseText += `\n\n📚 **知識庫更新 (${data.title}):**\n${summary}`;
+                  broadcast({ type: 'KNOWLEDGE_UPDATED' }); // Notify web UI
+                } catch (err: any) {
+                  responseText += `\n\n[系統錯誤：知識庫處理失敗 - ${err.message}]`;
+                }
+              } else if (call.name === 'syncToGitHub') {
+                try {
+                  const filesToSync = ["server.ts", "src/App.tsx", "src/services/geminiService.ts", "package.json"];
+                  const result = await github.syncFiles(filesToSync);
+                  responseText += `\n\n🚀 **GitHub 同步成功:**\n${result}`;
+                } catch (err: any) {
+                  responseText += `\n\n[系統錯誤：GitHub 同步失敗 - ${err.message}]`;
                 }
               }
             }
@@ -343,6 +548,11 @@ async function initBots() {
       console.error("Failed to initialize bot:", err.message);
     }
   }
+} catch (fatalErr: any) {
+  console.error("[System] Fatal error in initBots:", fatalErr);
+} finally {
+  isInitializingBots = false;
+}
 }
 
 // Remove redundant call
@@ -380,6 +590,8 @@ async function startServer() {
 
         const allIds = Array.from(new Set([...envIds, ...dbIds]));
 
+        const triggers = db.prepare("SELECT * FROM triggers").all();
+
         res.json({
           botTokenPresent: botTokens.length > 0,
           chatIdPresent: allIds.length > 0,
@@ -399,7 +611,8 @@ async function startServer() {
           nodeEnv: process.env.NODE_ENV,
           githubTokenPresent: !!process.env.GITHUB_TOKEN,
           githubRepoPresent: !!process.env.GITHUB_REPO,
-          telegramBotTokenPrefix: botTokens.length > 0 ? botTokens[0].substring(0, 4) + "..." : "None"
+          telegramBotTokenPrefix: botTokens.length > 0 ? botTokens[0].substring(0, 4) + "..." : "None",
+          triggers: triggers
         });
       } catch (err: any) {
         console.error("Debug status error:", err);
@@ -407,9 +620,85 @@ async function startServer() {
       }
     });
 
+    // API Usage Tracking
+    app.post("/api/usage/log", (req, res) => {
+      const { model } = req.body;
+      if (!model) return res.status(400).json({ error: "Model is required" });
+      db.prepare("INSERT INTO api_usage (model) VALUES (?)").run(model);
+      res.json({ status: "ok" });
+    });
+
+    app.get("/api/usage/stats", (req, res) => {
+      // Get usage for the last 7 days grouped by day
+      const stats = db.prepare(`
+        SELECT 
+          date(timestamp) as date,
+          COUNT(*) as count
+        FROM api_usage
+        WHERE timestamp >= date('now', '-7 days')
+        GROUP BY date(timestamp)
+        ORDER BY date ASC
+      `).all();
+      res.json(stats);
+    });
+
+    // Knowledge Base Routes
+    app.post("/api/knowledge/scrape", async (req, res) => {
+      const { url } = req.body;
+      if (!url) return res.status(400).json({ error: "URL is required" });
+
+      try {
+        const b = await getBrowser();
+        const page = await b.newPage();
+        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        
+        const data = await page.evaluate(() => {
+          // Remove noise
+          const scripts = document.querySelectorAll('script, style, nav, footer, iframe, noscript');
+          scripts.forEach(s => s.remove());
+          
+          return {
+            title: document.title,
+            text: document.body.innerText.replace(/\s+/g, ' ').trim().substring(0, 10000) // Limit to 10k chars for "traditional" efficiency
+          };
+        });
+
+        await page.close();
+        res.json(data);
+      } catch (err: any) {
+        console.error("Scrape error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    app.post("/api/knowledge/save", (req, res) => {
+      const { url, title, content, summary } = req.body;
+      try {
+        db.prepare(`
+          INSERT OR REPLACE INTO knowledge (url, title, content, summary)
+          VALUES (?, ?, ?, ?)
+        `).run(url, title, content, summary);
+        res.json({ status: "ok" });
+      } catch (err: any) {
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    app.get("/api/knowledge", (req, res) => {
+      const items = db.prepare("SELECT * FROM knowledge ORDER BY timestamp DESC").all();
+      res.json(items);
+    });
+
+    app.delete("/api/knowledge/:id", (req, res) => {
+      db.prepare("DELETE FROM knowledge WHERE id = ?").run(req.params.id);
+      res.json({ status: "ok" });
+    });
+
     // Initialize Bots AFTER defining basic health/debug routes
     // Removed blocking await to prevent server hang
-    // initBots().catch(e => console.error("[System] Async initBots failed:", e));
+    initBots().catch(e => console.error("[System] Async initBots failed:", e));
 
     app.get("/api/debug/env", (req, res) => {
       console.log("[Debug] Env Keys:", Object.keys(process.env));

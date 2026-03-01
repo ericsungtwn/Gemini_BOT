@@ -17,7 +17,9 @@ CAPABILITIES:
 2. Telegram Integration: You can send messages, reminders, and voice processing to the user's Telegram.
 3. Web Browsing: You can browse websites, extract content, and take screenshots using the 'browseWeb' tool.
 4. GitHub Sync: You can sync the current project's source code to a GitHub repository using the 'syncToGitHub' tool.
+5. Knowledge Base: You can summarize a webpage and save it to your persistent knowledge base using the 'summarize_url' tool.
 
+If the user provides a URL, you should proactively use the 'summarize_url' tool to index it into the knowledge base.
 If the user asks to send a message or reminder to Telegram, use the 'sendTelegramMessage' tool.
 If the user asks to check a website or see what's on a page, use the 'browseWeb' tool.
 If the user asks to save or backup the source code to GitHub, use the 'syncToGitHub' tool.
@@ -55,7 +57,7 @@ export class GeminiService {
     this.ai = new GoogleGenAI({ apiKey: apiKey || "MISSING_KEY" });
   }
 
-  async chat(userMessage: string, history: Message[]): Promise<{ text: string, functionCalls?: any[] }> {
+  async chat(userMessage: string, history: Message[], retryCount = 0, onRetry?: (attempt: number) => void): Promise<{ text: string, functionCalls?: any[] }> {
     const model = "gemini-flash-latest";
     
     const contents = history.map(msg => ({
@@ -68,96 +70,129 @@ export class GeminiService {
       parts: [{ text: userMessage }]
     });
 
-    const response = await this.ai.models.generateContent({
-      model,
-      contents,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        tools: [{
-          functionDeclarations: [
-            {
-              name: "sendTelegramMessage",
-              description: "Send a message or reminder to the user's Telegram account. Can be immediate or delayed.",
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  message: {
-                    type: Type.STRING,
-                    description: "The content of the message or reminder to send."
+    try {
+      const response = await this.ai.models.generateContent({
+        model,
+        contents,
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+          tools: [{
+            functionDeclarations: [
+              {
+                name: "sendTelegramMessage",
+                description: "Send a message or reminder to the user's Telegram account. Can be immediate or delayed.",
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    message: {
+                      type: Type.STRING,
+                      description: "The content of the message or reminder to send."
+                    },
+                    delayMs: {
+                      type: Type.NUMBER,
+                      description: "Optional delay in milliseconds before sending the message (e.g., 60000 for 1 minute)."
+                    }
                   },
-                  delayMs: {
-                    type: Type.NUMBER,
-                    description: "Optional delay in milliseconds before sending the message (e.g., 60000 for 1 minute)."
-                  }
-                },
-                required: ["message"]
-              }
-            },
-            {
-              name: "browseWeb",
-              description: "Browse a website to get its content or take a screenshot.",
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  url: {
-                    type: Type.STRING,
-                    description: "The URL of the website to visit."
+                  required: ["message"]
+                }
+              },
+              {
+                name: "browseWeb",
+                description: "Browse a website to get its content or take a screenshot.",
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    url: {
+                      type: Type.STRING,
+                      description: "The URL of the website to visit."
+                    },
+                    action: {
+                      type: Type.STRING,
+                      description: "The action to perform: 'content' (get text) or 'screenshot' (get base64 image).",
+                      enum: ["content", "screenshot"]
+                    }
                   },
-                  action: {
-                    type: Type.STRING,
-                    description: "The action to perform: 'content' (get text) or 'screenshot' (get base64 image).",
-                    enum: ["content", "screenshot"]
-                  }
-                },
-                required: ["url", "action"]
-              }
-            },
-            {
-              name: "syncToGitHub",
-              description: "Sync the current project source code to the configured GitHub repository.",
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  confirm: {
-                    type: Type.BOOLEAN,
-                    description: "Must be true to proceed with the sync."
-                  }
-                },
-                required: ["confirm"]
-              }
-            },
-            {
-              name: "setStockAlert",
-              description: "Set a price alert for a stock symbol.",
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  symbol: {
-                    type: Type.STRING,
-                    description: "The stock symbol (e.g., AAPL, 2330.TW)."
+                  required: ["url", "action"]
+                }
+              },
+              {
+                name: "syncToGitHub",
+                description: "Sync the current project source code to the configured GitHub repository.",
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    confirm: {
+                      type: Type.BOOLEAN,
+                      description: "Must be true to proceed with the sync."
+                    }
                   },
-                  targetPrice: {
-                    type: Type.NUMBER,
-                    description: "The target price to trigger the alert."
+                  required: ["confirm"]
+                }
+              },
+              {
+                name: "setStockAlert",
+                description: "Set a price alert for a stock symbol.",
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    symbol: {
+                      type: Type.STRING,
+                      description: "The stock symbol (e.g., AAPL, 2330.TW)."
+                    },
+                    targetPrice: {
+                      type: Type.NUMBER,
+                      description: "The target price to trigger the alert."
+                    },
+                    condition: {
+                      type: Type.STRING,
+                      description: "Trigger when price is 'above' or 'below' the target.",
+                      enum: ["above", "below"]
+                    }
                   },
-                  condition: {
-                    type: Type.STRING,
-                    description: "Trigger when price is 'above' or 'below' the target.",
-                    enum: ["above", "below"]
-                  }
-                },
-                required: ["symbol", "targetPrice", "condition"]
+                  required: ["symbol", "targetPrice", "condition"]
+                }
+              },
+              {
+                name: "summarize_url",
+                description: "Scrape a webpage, summarize its content, and save it to the persistent knowledge base.",
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    url: {
+                      type: Type.STRING,
+                      description: "The URL of the webpage to summarize."
+                    }
+                  },
+                  required: ["url"]
+                }
               }
-            }
-          ]
-        }]
-      },
-    });
+            ]
+          }]
+        },
+      });
 
-    return {
-      text: response.text || "",
-      functionCalls: response.functionCalls
-    };
+      return {
+        text: response.text || "",
+        functionCalls: response.functionCalls
+      };
+    } catch (error: any) {
+      // Check for 503 (Service Unavailable) or 429 (Too Many Requests)
+      const isRetryable = error.message?.includes("503") || 
+                          error.message?.includes("high demand") || 
+                          error.message?.includes("429") ||
+                          error.status === 503 ||
+                          error.status === 429;
+
+      if (isRetryable && retryCount < 3) {
+        const delay = Math.pow(2, retryCount) * 1000 + Math.random() * 1000;
+        console.warn(`[Gemini] 503/429 detected. Retrying in ${Math.round(delay)}ms... (Attempt ${retryCount + 1}/3)`);
+        if (onRetry) onRetry(retryCount + 1);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.chat(userMessage, history, retryCount + 1, onRetry);
+      }
+      
+      throw error;
+    }
   }
 }
 
